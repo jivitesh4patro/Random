@@ -1,4 +1,6 @@
-
+#REQUIREMENTS TO RUN THIS PROJECT 
+#numpy>=1.24
+#pygame-ce>=2.5
 import sys
 import time
 from pathlib import Path
