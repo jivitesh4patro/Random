@@ -1,0 +1,43 @@
+HOW IT WORKS - Black Hole
+JIN2 · @jin_22ee
+
+The whole artwork is one Python file. Every cell of the screen asks
+"how hot is the gas here?" and the answer becomes a letter and a colour.
+
+1. The circle
+   A thin ring of light draws itself around an empty centre. That empty
+   centre is the shadow: nothing behind it is drawn.
+
+2. The glow
+   A soft red glow swells and settles around the ring, made from a few
+   layered sine waves that move slowly.
+
+3. The disk
+   The disk is a flat ring of gas seen almost edge on, tilted 17 degrees.
+   Each cell is turned back into a radius and an angle on that disk.
+   The gas is thin rings on circular orbits, and the inner ones turn
+   faster (speed falls off with radius to the power 1.5).
+   The side coming toward you is a little brighter.
+
+4. The bent ring
+   The far side of the disk is bent by gravity and shows up as the
+   bright ring around the shadow. It uses the same rings of gas as the
+   disk, so the streaks run on from one to the other.
+
+5. The flash
+   At 7.8 seconds everything flares, a shock ring runs outward and the
+   view slowly moves in and looks down a little. After that, sparks of
+   light ride the orbits along the disk and up over the shadow.
+
+6. From heat to letters
+   Hotter cells get denser letters (from : and ; up to 8 B $ #) and
+   warmer colours (deep red, red, orange, amber, pale gold).
+   The ring itself is drawn with / | \ - following its direction.
+   Each frame fades into the next and a soft glow is added on top.
+
+Things you can try (for yourself)
+   TILT, INC       how the disk leans and how open it looks
+   R0              size of the shadow
+   R_IN, R_OUT     where the disk starts and ends
+   FLASH           when the flash happens
+   TAG_COLOR       the colours

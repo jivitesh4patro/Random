@@ -1,0 +1,308 @@
+# Black Hole
+# JIN2 (@jin_22ee), 2026. Free to use for personal projects, see LICENSE.txt.
+#
+#   pip install -r requirements.txt
+#   python black_hole.py
+#
+# Space pause, R restart, S screenshot, Esc quit
+
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import pygame
+
+TAU = np.pi * 2
+LOOP = 20.0         # length of one run (s)
+
+POOLS = ["1il!;:", "rtfjcvxz=+", "aeoun0{}[]<>", "08B$#&%Q"]   # dark -> bright
+CHARS = " .,:~+*^01|/\\-_#()x" + "".join(POOLS)
+AT = {c: i for i, c in enumerate(CHARS)}
+FILL = np.array([[AT[p[k % len(p)]] for k in range(12)] for p in POOLS])
+
+
+def smooth(x):
+    x = np.clip(x, 0.0, 1.0)
+    return x * x * (3 - 2 * x)
+
+
+# the black hole
+
+#            deep red        red             orange          amber           white hot        star             dust
+TAG_COLOR = [[190, 38, 12], [242, 78, 20], [255, 124, 34], [255, 172, 78], [255, 222, 168], [220, 228, 255], [130, 72, 48]]
+DEEP, RED, ORANGE, AMBER, HOT, STAR, DUST = range(7)
+
+R0 = 0.11                    # shadow radius (frame height = 1)
+TILT = np.radians(17)        # the disk leans down to the right
+INC = 0.12                   # how flat the disk looks from here
+R_IN, R_OUT = 1.55 * R0, 5.4 * R0
+FLASH = 7.8                  # the moment the disk lights up
+
+_grid = {}
+
+
+def grid(cols, rows, aspect):
+    key = (cols, rows)
+    if key not in _grid:
+        rng = np.random.default_rng(7)
+        x = ((np.arange(cols) + 0.5) / cols - 0.5) * aspect
+        y = (np.arange(rows) + 0.5) / rows - 0.5
+        X, Y = np.meshgrid(x, y)
+        _grid[key] = X, Y, rng.random((rows, cols)), rng.integers(0, 12, (rows, cols))
+    return _grid[key]
+
+
+def spin(t):
+    # slow drift before the flash, a little faster after it
+    s = np.maximum(t - FLASH, 0.0)
+    return 0.06 * t + 0.28 * (s - 0.8 * (1 - np.exp(-s / 0.8)))
+
+
+def ripple(a, b, t):
+    return (np.sin(a + 0.9 * np.sin(b + 1.3 * t)) * 0.5
+            + np.sin(2.3 * a - b + 0.7 * t) * 0.3
+            + np.sin(4.1 * a + 1.7 * b - 1.1 * t) * 0.2)
+
+
+def gas(phi, rho, t, w):
+    # thin rings of gas on circular orbits; the inner ones turn faster
+    phase = phi - (rho / R_IN) ** -1.5 * w
+    lr = np.log(rho / R0)
+    a = 46 * lr + 0.9 * np.sin(phase + 3 * lr)
+    streak = 0.55 + 0.3 * np.sin(a) + 0.15 * np.sin(2.3 * a + 2 * phase) + 0.12 * np.sin(3 * phase - 7 * lr + 0.3 * t)
+    # after the flash, sparks of light ride the orbits: along the disk, up over the
+    # shadow on the bent ring, and back down into the disk on the other side
+    pulses = 0.0
+    for ring_r, start, speed in ((1.8, 0.0, 0.95), (2.4, 2.1, 0.8), (3.2, 4.2, 0.65)):
+        d = (phi - start - speed * t + np.pi) % TAU - np.pi
+        comet = np.where(d > 0, np.exp(-(d / 0.18) ** 2), np.exp(d / 0.9))    # bright head, long tail
+        pulses = pulses + comet * np.exp(-((lr - np.log(ring_r)) / 0.07) ** 2)
+    streak = streak + 0.9 * smooth((t - FLASH) / 1.0) * pulses
+    return streak, phase, lr
+
+
+def tangent_letter(dx, dy):
+    s = np.degrees(np.arctan2(-dy, dx)) % 180
+    out = np.full(s.shape, AT["\\"])
+    out[(s < 22.5) | (s >= 157.5)] = AT["-"]
+    out[(s >= 22.5) & (s < 67.5)] = AT["/"]
+    out[(s >= 67.5) & (s < 112.5)] = AT["|"]
+    return out
+
+
+def accretion_disk(X, Y, t, w, inc=INC):
+    u = X * np.cos(TILT) + Y * np.sin(TILT)
+    v = -X * np.sin(TILT) + Y * np.cos(TILT)
+    rho = np.hypot(u, v / inc)
+    phi = np.arctan2(v / inc, u)
+    streak, phase, lr = gas(phi, rho, t, w)
+    edge = smooth((rho - R_IN) / (0.25 * R0)) * smooth((R_OUT - rho) / (2.2 * R0))
+    heat = 1.5 * edge * streak * (R_IN / rho) ** 1.0
+    heat *= 1 - 0.25 * u / np.maximum(rho, 1e-6)    # the side coming toward us is brighter
+    return heat, u, v, phase, lr
+
+
+def lensed_halo(r, ang, t, w):
+    # the far side of the disk, bent up and over the shadow
+    top = 0.5 - 0.5 * np.sin(ang - TILT)
+    side = np.abs(np.cos(ang - TILT)) ** 10              # where the ring meets the disk, left and right
+    out = np.maximum(r - 1.1 * R0, 0)
+    band = np.exp(-(out / (0.2 * R0 + 0.24 * R0 * top + 0.45 * R0 * side)) ** 2) * np.exp(-(np.minimum(r - 1.1 * R0, 0) / (0.2 * R0)) ** 2)
+    # same rings as the disk, so the bright circle is the disk itself, bent by gravity;
+    # near the disk the ring uses the disk's own radius, so the streaks run straight on
+    rho = (1 - side) * (R_IN + np.maximum(r - 1.0 * R0, 0) * 2.6) + side * np.maximum(r, R_IN)
+    flow, _, _ = gas(ang - TILT, rho, t, w)
+    return 1.2 * band * flow * (0.5 + 0.8 * top) * (1 - 0.25 * np.cos(ang - TILT))
+
+
+def frame(t, cols, rows, aspect):
+    X, Y, rnd, hsh = grid(cols, rows, aspect)
+    cam = smooth(smooth((t - FLASH + 0.3) / 2.6))      # on the flash: move in and look down from above
+    zoom, inc = 1 + 0.28 * cam, INC + 0.09 * cam
+    X, Y = X / zoom, (Y + 0.02 * cam) / zoom
+    r = np.hypot(X, Y)
+    ang = np.arctan2(Y, X)
+    w = spin(t)
+    flash = np.exp(-((t - FLASH) / 0.22) ** 2)
+
+    # 1. the circle draws itself
+    ring_k = smooth((t - 0.3) / 2.2)
+    around = ((ang + np.pi / 2) % TAU) / TAU
+    ring = np.exp(-((r - 1.02 * R0) / (0.045 * R0)) ** 2) * smooth((ring_k * 1.08 - around) / 0.08)
+
+    # 2. a soft glow breathing around it, which settles into the disk's own rings
+    disk_on = smooth((t - 5.0) / 2.8)
+    aura_k = smooth((t - 2.2) / 1.8) * (1 - 0.65 * disk_on)
+    rings, _, _ = gas(ang - TILT, R_IN + np.maximum(r - 1.0 * R0, 0) * 2.6, t, w)
+    puff = 0.5 + 0.5 * ripple(2 * ang, 5 * r - 0.45 * t, 0.35 * t)
+    puff = puff * (1 - disk_on) + rings * disk_on
+    reach = 0.32 * R0 * (0.7 + 0.6 * puff)
+    aura = aura_k * np.exp(-(np.maximum(r - R0, 0) / reach) ** 1.6) * (0.6 + 0.4 * puff)
+
+    # 3. the disk spreads out sideways, then lights up
+    disk, u, v, phase, lr = accretion_disk(X, Y, t, w, inc)
+    span = R0 + disk_on * (R_OUT * 1.1 - R0)
+    disk *= smooth((t - 5.0) / 0.8) * smooth((span - np.abs(u)) / (0.6 * R0)) * (0.55 + 0.45 * smooth((t - FLASH + 0.3) / 0.4))
+    halo = lensed_halo(r, ang, t, w) * smooth((t - 5.0) / 2.2)
+
+    shock = 0.0
+    if t > FLASH:
+        front = R0 + (t - FLASH) * 0.55
+        shock = np.exp(-((r - front) / 0.02) ** 2) * np.exp(-(t - FLASH) / 0.5) * 0.9
+
+    # screen blend instead of max, so glow, halo and disk melt into each other
+    soft = 1 - (1 - np.clip(aura * 0.55, 0, 1)) * (1 - np.clip(halo, 0, 1)) * (1 - np.clip(disk, 0, 1))
+    soft = np.maximum(soft, np.maximum(disk, halo))
+    heat = np.maximum.reduce([ring * (0.9 + 0.3 * smooth((t - 5) / 2)), soft, np.broadcast_to(shock, r.shape)])
+    heat = heat * (1 + 1.4 * flash)
+
+    inside = r < R0 * 0.97
+    front_side = v > 0
+    heat = np.where(inside & ~front_side, 0.0, heat)    # the shadow hides what is behind it
+    heat = np.where(inside & front_side, np.where(disk > 0.2, disk, 0.0), heat)
+
+    on = heat > 0.07
+    level = np.clip((heat * 3.6).astype(int), 0, 3)
+    char = FILL[level, (hsh + (phase * 2 + lr * 6).astype(int)) % 12]
+    is_ring = (ring > aura * 0.8) & (ring > disk) & (ring > halo) & (ring > 0.25)
+    char = np.where(is_ring, tangent_letter(-np.sin(ang), np.cos(ang)), char)
+    char = np.where(on, char, AT[" "])
+
+    tag = np.select([heat < 0.1, heat < 0.2, heat < 0.45, heat < 0.75], [DEEP, RED, ORANGE, AMBER], HOT)
+    lum = np.where(on, np.clip(0.42 + 0.85 * heat, 0, 1.3) * (0.35 + 0.65 * smooth((heat - 0.07) / 0.15)), 0.0)
+
+    # a few stars and some dust behind everything
+    star = ~on & ~inside & (rnd < 0.0025)
+    char = np.where(star, np.where(rnd < 0.0005, AT["+"], np.where(rnd < 0.0012, AT["*"], AT["."])), char)
+    tag = np.where(star, STAR, tag)
+    lum = np.where(star, 0.75 + 0.2 * np.sin(0.8 * t + rnd * 9000), lum)
+    lane = np.exp(-(((-X * np.sin(TILT) + Y * np.cos(TILT)) - 0.02) / 0.09) ** 2)
+    dust = ~on & ~star & ~inside & (rnd > 1 - 0.035 * lane) & (t > 4.0)
+    char = np.where(dust, np.where(rnd > 1 - 0.01 * lane, AT[":"], AT[","]), char)
+    tag = np.where(dust, DUST, tag)
+    lum = np.where(dust, 0.3 * smooth((t - 4.0) / 3.0), lum)
+
+    count = int((char != AT[" "]).sum())
+    return char.astype(int), lum.astype(np.float32), tag.astype(int), {"spin": float(w), "heat": float(heat.max())}, count
+
+
+
+# window
+
+TITLE = "Black Hole - JIN2"
+SIGN = "@jivitesh · 2026"
+CW, CH, FONT_PX = 7, 11, 12
+W, H = 1080, 960
+COLS, ROWS = W // CW, H // CH
+ASPECT = (COLS * CW) / (ROWS * CH)
+TRAIL = 0.4
+COLORS = np.array(TAG_COLOR, np.float32) / 255
+DIM, PINK = (110, 104, 120), (255, 122, 182)
+MONO = "consolas,menlo,dejavusansmono,couriernew,monospace"
+
+
+def hud(info):
+    return f"spin {info['spin']:.2f}   heat {info['heat']:.2f}"
+
+
+def glyphs():
+    font = pygame.font.SysFont(MONO, FONT_PX)
+    atlas = []
+    for ch in CHARS:
+        s = pygame.Surface((CW, CH))
+        g = font.render(ch, True, (255, 255, 255))
+        s.blit(g, ((CW - g.get_width()) // 2, (CH - g.get_height()) // 2))
+        atlas.append(pygame.surfarray.array3d(s)[:, :, 0].T.astype(np.float32) / 255)
+    return np.stack(atlas)
+
+
+class Canvas:
+    def __init__(self, atlas):
+        self.atlas = (atlas * 255).astype(np.uint8)
+        self.shape = pygame.Surface((COLS * CW, ROWS * CH))
+        self.trail = pygame.Surface((W, H))
+        self.fade = (int(TRAIL * 255),) * 3
+
+    def reset(self):
+        self.trail.fill((0, 0, 0))
+
+    def draw(self, t):
+        char, lum, tag, info, count = frame(t, COLS, ROWS, ASPECT)
+        mask = self.atlas[char.T].transpose(0, 3, 1, 2).reshape(COLS * CW, ROWS * CH)
+        pygame.surfarray.blit_array(self.shape, np.repeat(mask[..., None], 3, 2))
+        col = np.clip(COLORS[np.clip(tag, 0, len(COLORS) - 1)] * lum[..., None] * 255, 0, 255).astype(np.uint8)
+        tint = pygame.transform.scale(pygame.surfarray.make_surface(col.transpose(1, 0, 2)), self.shape.get_size())
+        self.shape.blit(tint, (0, 0), special_flags=pygame.BLEND_MULT)
+        self.trail.fill(self.fade, special_flags=pygame.BLEND_MULT)     # previous frame fades
+        self.trail.blit(self.shape, (0, 0), special_flags=pygame.BLEND_MAX)
+        return self.trail, info, count
+
+
+def blur(surf, k, radius):
+    small = pygame.transform.smoothscale(surf, (W // k, H // k))
+    if hasattr(pygame.transform, "gaussian_blur"):
+        small = pygame.transform.gaussian_blur(small, max(1, radius // k))
+    return pygame.transform.smoothscale(small, (W, H))
+
+
+def glow_layer(surf, amount):
+    layer = surf.copy()
+    layer.fill((int(255 * amount),) * 3, special_flags=pygame.BLEND_MULT)
+    return layer
+
+
+def window_size():
+    # shrink on small / scaled displays
+    info = pygame.display.Info()
+    k = 1.0
+    if info.current_w > 0 and info.current_h > 0:
+        k = min(1.0, 0.85 * info.current_h / H, 0.95 * info.current_w / W)
+    return int(W * k), int(H * k)
+
+
+def main():
+    pygame.init()
+    size = window_size()
+    window = pygame.display.set_mode(size)
+    pygame.display.set_caption(TITLE)
+    screen = pygame.Surface((W, H))
+    small = pygame.font.SysFont(MONO, 17)
+    canvas, clock = Canvas(glyphs()), pygame.time.Clock()
+    t, paused = 0.0, False
+    art, info, count = canvas.draw(t)
+    while True:
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE):
+                pygame.quit()
+                return
+            if e.type == pygame.KEYDOWN and e.key == pygame.K_SPACE:
+                paused = not paused
+            if e.type == pygame.KEYDOWN and e.key == pygame.K_r:
+                t = 0.0
+                canvas.reset()
+            if e.type == pygame.KEYDOWN and e.key == pygame.K_s:
+                pygame.image.save(screen, str(Path(__file__).with_name(f"black_hole_{int(time.time())}.png")))
+        dt = clock.tick(30) / 1000
+        if not paused:
+            t += min(dt, 1 / 15)
+            if t > LOOP:
+                t = 0.0
+                canvas.reset()
+            art, info, count = canvas.draw(t)
+        screen.fill((0, 0, 0))
+        screen.blit(art, (0, 0))
+        screen.blit(glow_layer(blur(art, 4, 5), 0.75), (0, 0), special_flags=pygame.BLEND_ADD)
+        screen.blit(glow_layer(blur(art, 8, 22), 0.45), (0, 0), special_flags=pygame.BLEND_ADD)
+        y = H - 70
+        screen.blit(small.render(SIGN, True, (120, 112, 128)), (64, y - 26))
+        screen.blit(small.render(hud(info), True, DIM), (64, y))
+        screen.blit(small.render(f"letters {count:05,d}", True, DIM), (64, y + 26))
+        tt = small.render(f"{'●' if int(t * 2) % 2 == 0 else ' '} t {t:05.2f}s", True, PINK)
+        screen.blit(tt, (W - 64 - tt.get_width(), 30))
+        window.blit(screen if size == (W, H) else pygame.transform.smoothscale(screen, size), (0, 0))
+        pygame.display.flip()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
